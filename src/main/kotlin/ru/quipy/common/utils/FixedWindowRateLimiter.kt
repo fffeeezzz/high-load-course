@@ -18,7 +18,7 @@ interface RateLimiter {
 class FixedWindowRateLimiter(
     private val rate: Int,
     private val window: Long,
-    private val timeUnit: TimeUnit = TimeUnit.SECONDS, // todo: заменили на секунды
+    private val timeUnit: TimeUnit = TimeUnit.MINUTES,
 ): RateLimiter {
     companion object {
         private val logger: Logger = LoggerFactory.getLogger(FixedWindowRateLimiter::class.java)
