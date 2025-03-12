@@ -59,7 +59,7 @@ class PaymentExternalSystemAdapterImpl(
 
         semaphore.acquire()
 
-        if (willCompleteAfterDeadline(deadline)) {
+        if (expireByDeadline(deadline)) {
             logger.error("[$accountName] Payment would complete after deadline for txId: $transactionId, payment: $paymentId, stage: enough parallel requests")
             paymentESService.update(paymentId) {
                 it.logProcessing(
@@ -76,7 +76,7 @@ class PaymentExternalSystemAdapterImpl(
 
         rt.tickBlocking()
 
-        if (willCompleteAfterDeadline(deadline)) {
+        if (expireByDeadline(deadline)) {
             logger.error("[$accountName] Payment would complete after deadline for txId: $transactionId, payment: $paymentId, stage: enough rps tokens")
             paymentESService.update(paymentId) {
                 it.logProcessing(
@@ -121,7 +121,7 @@ class PaymentExternalSystemAdapterImpl(
 
     override fun name() = properties.accountName
 
-    private fun willCompleteAfterDeadline(deadline: Long): Boolean {
+    private fun expireByDeadline(deadline: Long): Boolean {
         val expectedEnd = now() + requestAverageProcessingTime.toMillis() * 2
 
         return expectedEnd >= deadline
@@ -152,7 +152,7 @@ class PaymentExternalSystemAdapterImpl(
                 ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
             }
 
-            if ((availableHTTPCodesToRetry.contains(response.code) || !body.result) && !willCompleteAfterDeadline(deadline)) {
+            if ((availableHTTPCodesToRetry.contains(response.code) || !body.result) && !expireByDeadline(deadline)) {
                 val delta = now() - firstAttemptTime
                 if (delta <= 1000) {
                     Thread.sleep(1000 - delta)
