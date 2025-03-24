@@ -2,6 +2,7 @@ package ru.quipy.common.utils
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -53,14 +54,18 @@ class SlidingWindowRateLimiter(
         while (true) {
             val head = queue.peek()
             val winStart = System.currentTimeMillis() - window.toMillis()
-            if (head == null || head.timestamp > winStart) {
+            if (head == null) {
+                delay(1L)
+                continue
+            }
+            if (head.timestamp > winStart) {
+                delay(head.timestamp - winStart)
                 continue
             }
             sum.addAndGet(-1)
             queue.take()
         }
     }.invokeOnCompletion { th -> if (th != null) logger.error("Rate limiter release job completed", th) }
-
     companion object {
         private val logger: Logger = LoggerFactory.getLogger(SlidingWindowRateLimiter::class.java)
     }
