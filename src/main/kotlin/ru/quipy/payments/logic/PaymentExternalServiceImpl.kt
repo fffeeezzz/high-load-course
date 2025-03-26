@@ -44,10 +44,10 @@ class PaymentExternalSystemAdapterImpl(
 
     private val pool = ThreadPoolExecutor(
         8, // corePoolSize
-        8, // maximumPoolSize
+        16, // maximumPoolSize
         15, // keepAliveTime
         TimeUnit.MINUTES, // time unit for keepAliveTime
-        LinkedBlockingQueue(rateLimitPerSec), // workQueue
+        LinkedBlockingQueue(8), // workQueue
         Executors.defaultThreadFactory(), // threadFactory
         ThreadPoolExecutor.AbortPolicy() // rejection handler
     )
