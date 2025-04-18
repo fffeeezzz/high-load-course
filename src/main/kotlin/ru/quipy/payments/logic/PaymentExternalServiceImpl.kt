@@ -2,10 +2,13 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.github.dockerjava.api.command.AuthCmd.Exec
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import org.HdrHistogram.Histogram
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.Http3TimeoutInterceptor
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -13,6 +16,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.*
+import kotlin.math.min
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -34,23 +38,19 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
+    private var avgRT: Duration = Duration.ofMillis(requestAverageProcessingTime.toMillis() * 2)
+    private var maxTrackableRT = requestAverageProcessingTime.toMillis() * 2
+    private val hist = Histogram(requestAverageProcessingTime.toMillis(), maxTrackableRT, 2)
+
     private val client = OkHttpClient.Builder()
-        .callTimeout(Duration.ofMillis(requestAverageProcessingTime.toMillis() + 100))
+        .addInterceptor(Http3TimeoutInterceptor { avgRT.toMillis() })
         .build()
 
     private val rt = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
 
     private var semaphore = Semaphore(parallelRequests, true)
 
-    private val pool = ThreadPoolExecutor(
-        8, // corePoolSize
-        16, // maximumPoolSize
-        15, // keepAliveTime
-        TimeUnit.MINUTES, // time unit for keepAliveTime
-        LinkedBlockingQueue(8), // workQueue
-        Executors.defaultThreadFactory(), // threadFactory
-        ThreadPoolExecutor.AbortPolicy() // rejection handler
-    )
+    private val pool = Executors.newFixedThreadPool(parallelRequests)
 
     private val cachedPool = Executors.newCachedThreadPool()
 
@@ -65,11 +65,6 @@ class PaymentExternalSystemAdapterImpl(
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
-
-        val request = Request.Builder().run {
-            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=${Duration.ofMillis(requestAverageProcessingTime.toMillis())}")
-            post(emptyBody)
-        }.build()
 
         try {
             pool.submit {
@@ -108,7 +103,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
 
                 try {
-                    executeRequest(request, transactionId, paymentId, deadline)
+                    executeRequest(amount, transactionId, paymentId, deadline)
                 } catch (e: Exception) {
                     when (e) {
                         is SocketTimeoutException -> {
@@ -149,13 +144,13 @@ class PaymentExternalSystemAdapterImpl(
     override fun name() = properties.accountName
 
     private fun expireByDeadline(deadline: Long): Boolean {
-        val expectedEnd = now() + requestAverageProcessingTime.toMillis() * 2
+        val expectedEnd = now() + avgRT.toMillis()
 
         return expectedEnd >= deadline
     }
 
     private fun executeRequest(
-        request: Request,
+        amount: Int,
         transactionId: UUID,
         paymentId: UUID,
         deadline: Long,
@@ -167,18 +162,33 @@ class PaymentExternalSystemAdapterImpl(
             return
         }
 
+        val startTime = now()
+
+        val request = Request.Builder().run {
+            url(
+                "http://localhost:1234/external/process?" +
+                        "serviceName=${serviceName}&" +
+                        "accountName=${accountName}&" +
+                        "transactionId=$transactionId&" +
+                        "paymentId=$paymentId&" +
+                        "amount=$amount&" +
+                        "timeout=$avgRT"
+            )
+            post(emptyBody)
+        }.build()
+
         try {
             client.newCall(request).execute().use { response ->
-                if (response.code > 200) {
-                    logger.error("response code ${response.code}")
-                }
-
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                 } catch (e: Exception) {
                     logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                     ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                 }
+
+                hist.recordValue(now() - startTime)
+
+                avgRT = Duration.ofMillis(minOf(hist.getValueAtPercentile(90.0), maxTrackableRT))
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
@@ -187,7 +197,7 @@ class PaymentExternalSystemAdapterImpl(
                     if (delta <= 1000) {
                         Thread.sleep(1000 - delta)
                     }
-                    executeRequest(request, transactionId, paymentId, deadline, times)
+                    executeRequest(amount, transactionId, paymentId, deadline, times)
                 } else {
                     // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
                     // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
@@ -203,7 +213,7 @@ class PaymentExternalSystemAdapterImpl(
                 if (delta <= 1000) {
                     Thread.sleep(1000 - delta)
                 }
-                executeRequest(request, transactionId, paymentId, deadline, times)
+                executeRequest(amount, transactionId, paymentId, deadline, times)
             } else {
                 throw e
             }
