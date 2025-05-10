@@ -67,7 +67,7 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         try {
-            pool.submit {
+            cachedPool.submit {
                 semaphore.acquire()
 
                 if (expireByDeadline(deadline)) {
